@@ -1,10 +1,13 @@
 // The token radar's model: one snapshot of the protocol universe in, one ranked board out.
 //
 // The board covers every slug in the snapshot's watchlist (the floor, never a ceiling) and may add
-// pre-token protocols below the watchlist floor: the early rows the radar exists to find. A protocol is
-// pre-token when its index entry records no token (no market cap, no CoinGecko id, no symbol); the
-// snapshot's live-token protocols are kept apart and shown as the market's own values, never mixed into
-// the ranked board.
+// rankable pre-token protocols the watchlist does not name, above the floor as well as below it:
+// the early rows the radar exists to find. A protocol is pre-token when its index entry records no
+// token (no market cap, no CoinGecko id, no symbol); the snapshot's live-token protocols are kept
+// apart and shown as the market's own values, never mixed into the ranked board. Each row also
+// carries its printed range (implied divided and multiplied by 3), its launch odds (its age band's
+// token rate), and its farm economics as numbers; the board's ledger counts every protocol in the
+// snapshot once, and the backtest prices the tokens that trade by splitting them on listing date.
 //
 // Implied value follows only from the snapshot's own figures:
 //
@@ -74,6 +77,19 @@ export const MODEL: ModelConstants = {
 /** The model's version label: the dashboard names it and the rules quote it. */
 export const MODEL_VERSION = 'radar-2';
 
+/** The printed range around an implied value: a factor of 3 either way. The backtest
+ *  measures how often the newer half of the tokens that trade landed inside it. */
+export const RANGE_FACTOR = 3;
+
+/** Age buckets for launch odds: the share of protocols this old that record a token. */
+export const ODDS_BUCKETS: Array<{ label: string; lo: number; hi: number | null }> = [
+  { label: 'under 6 months', lo: 0, hi: 180 },
+  { label: '6–12 months', lo: 180, hi: 365 },
+  { label: '1–2 years', lo: 365, hi: 730 },
+  { label: '2–3 years', lo: 730, hi: 1095 },
+  { label: 'over 3 years', lo: 1095, hi: null },
+];
+
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 260;
 
@@ -103,6 +119,10 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
+  range_low_usd: number;
+  range_high_usd: number;
+  launch_odds: number;
+  farm: FarmNumbers;
   model: {
     base_multiple: number;
     growth_pct: number;
@@ -112,6 +132,19 @@ export interface BoardRow {
     age_days: number | null;
   };
   farm_steps: string[];
+}
+
+/** One row's farm economics as numbers, from the same functions that write its steps:
+ *  the capital the plan deposits, the gas each week costs on its first chain, the gas of
+ *  the first transaction, the hold in days, the weeks of qualifying actions, and the
+ *  hours the plan takes. The dashboard's slice, net and verdict all derive from these. */
+export interface FarmNumbers {
+  capital_usd: number;
+  gas_usd: number;
+  setup_gas_usd: number;
+  hold_days: number;
+  weeks: number;
+  hours: number;
 }
 
 /** The dashboard's compact view of one row. Farm steps come from board.json's own derivation,
@@ -128,6 +161,10 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  range_low_usd: number;
+  range_high_usd: number;
+  launch_odds: number;
+  farm: FarmNumbers;
   growth_multiplier: number;
   maturity_multiplier: number;
   chain_multiplier: number;
@@ -146,6 +183,39 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
+/** One bucket of the 758-protocol ledger: every protocol in the snapshot, counted once. */
+export interface LedgerBucket {
+  label: string;
+  count: number;
+  note: string;
+}
+
+/** The model's backtest on the tokens that trade: the live protocols are split by listing
+ *  date, the older half calibrates nothing but a flat TVL multiple, and the newer half is
+ *  priced by the model from TVL, growth, age and chains alone. Misses are medians of the
+ *  absolute log error, shown as multiples, so a miss of x4.8 means the typical price is
+ *  within a factor of 4.8 either way. */
+export interface Backtest {
+  n_live: number;
+  n_older: number;
+  n_newer: number;
+  flat_multiple_older: number;
+  model_miss_newer: number;
+  flat_miss_newer: number;
+  within_x3_newer_pct: number;
+  bias_newer: number;
+  range_factor: number;
+}
+
+/** One launch-odds cohort: protocols listed in an age band, and the share that record a token. */
+export interface OddsCohort {
+  label: string;
+  lo_days: number;
+  hi_days: number | null;
+  n: number;
+  token_rate: number;
+}
+
 /** Everything the dashboard needs: the board, the live set, and the model it runs. */
 export interface RadarData {
   as_of: string;
@@ -157,6 +227,10 @@ export interface RadarData {
   board_size: number;
   early_size: number;
   live_size: number;
+  total_implied_usd: number;
+  ledger: LedgerBucket[];
+  backtest: Backtest;
+  odds_cohorts: OddsCohort[];
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -249,14 +323,17 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     const p = index.get(slug);
     if (p !== undefined) chosen.set(slug, p);
   }
-  // The early radar: pre-token protocols below the watchlist floor, by TVL, capped. Never a replacement
-  // for a watchlist row: a chosen protocol stays chosen.
+  // The early radar: every rankable pre-token protocol the watchlist does not name, by TVL,
+  // capped. The watchlist is the floor, never the ceiling: a rankable protocol above the floor
+  // is ranked too, even when the watchlist does not name it. Never a replacement for a
+  // watchlist row: a chosen protocol stays chosen.
   const early = snapshot.protocols
-    .filter((p) => !chosen.has(p.slug) && isRankable(p) && p.tvl_usd < snapshot.floor_usd)
+    .filter((p) => !chosen.has(p.slug) && isRankable(p))
     .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0))
     .slice(0, EARLY_ROWS);
   for (const p of early) chosen.set(p.slug, p);
 
+  const cohorts = oddsCohorts(snapshot);
   const scored = [...chosen.values()].map((p) => {
     const { implied, growthPct, growthMult, maturityMult, chainMult, age } = impliedValue(p, snapshot.as_of, model);
     return { p, implied, growthPct, growthMult, maturityMult, chainMult, age };
@@ -277,6 +354,10 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     token_status: 'pre-token',
     age_days: s.age,
     implied_value_usd: s.implied,
+    range_low_usd: Math.max(1, Math.round(s.implied / RANGE_FACTOR)),
+    range_high_usd: Math.round(s.implied * RANGE_FACTOR),
+    launch_odds: launchOddsFor(s.age, cohorts),
+    farm: farmNumerics(s.p, s.age),
     model: {
       base_multiple: model.base_multiple,
       growth_pct: s.growthPct,
@@ -341,6 +422,145 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
  * A protocol's farm plan: six steps, each an action with a cost and a time. The plan is derived from
  * the protocol's own record (category, chains, TVL, age), never from a hand-written list of names.
  */
+/** The median of a non-empty list: the middle value, or the mean of the two middles. */
+export function median(values: number[]): number {
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+/** The dollar cost of one transaction on a chain, as a number: the same rule the steps print
+ *  as words. Ethereum costs about $8, the cheap chains under $1, the rest about $3. */
+export function gasUsdFor(chain: string): number {
+  const c = chain.toLowerCase();
+  if (c === 'ethereum') return 8;
+  if (c === 'solana' || c === 'base' || c === 'arbitrum' || c === 'optimism' || c === 'polygon' || c === 'blast' || c === 'ink' || c === 'linea') return 1;
+  return 3;
+}
+
+/** A row's farm economics as numbers, from the same functions that write its steps: the capital
+ *  the plan deposits, the gas each weekly action costs on its first chain, the gas of the first
+ *  transaction, the hold in days, the weeks of qualifying actions, and the hours the plan takes
+ *  (35 fixed minutes: wallet, deposit, claim, log, plus 10 minutes a week). */
+export function farmNumerics(p: SnapshotProtocol, age: number | null): FarmNumbers {
+  const capital = capitalFor(p);
+  const hold = holdDaysFor(age);
+  const weeks = Math.ceil(hold / 7);
+  const gas = gasUsdFor(chainOf(p));
+  const hours = 35 / 60 + weeks / 6;
+  return { capital_usd: capital, gas_usd: gas, setup_gas_usd: 3, hold_days: hold, weeks, hours: Math.round(hours * 100) / 100 };
+}
+
+/** The launch-odds cohorts: every protocol with a listing date, banded by age, with the share
+ *  that records a token. A protocol with no listing date takes the 1–2 year band's rate, the
+ *  same band the model's unknown age (365 days) sits in. */
+export function oddsCohorts(snapshot: Snapshot): OddsCohort[] {
+  return ODDS_BUCKETS.map((b) => {
+    const inBand = snapshot.protocols.filter((p) => {
+      if (p.listed_at === null) return false;
+      const age = ageDays(snapshot.as_of, p.listed_at);
+      return age !== null && age >= b.lo && (b.hi === null || age < b.hi);
+    });
+    const withToken = inBand.filter((p) => !isPreToken(p)).length;
+    return {
+      label: b.label,
+      lo_days: b.lo,
+      hi_days: b.hi,
+      n: inBand.length,
+      token_rate: inBand.length ? withToken / inBand.length : 0,
+    };
+  });
+}
+
+/** A row's launch odds: its age band's token rate, or the 1–2 year band when its age is unknown. */
+export function launchOddsFor(ageDaysValue: number | null, cohorts: OddsCohort[]): number {
+  const age = ageDaysValue ?? 365;
+  const idx = ODDS_BUCKETS.findIndex((b) => age >= b.lo && (b.hi === null || age < b.hi));
+  return cohorts[idx < 0 ? 2 : idx].token_rate;
+}
+
+/** The backtest: the tokens that trade, split by listing date into an older half and a newer
+ *  half. The older half sets a flat TVL multiple; the newer half is priced by the model from
+ *  TVL, growth, age and chains alone, and by the flat multiple for comparison. Misses are
+ *  medians of the absolute log error, shown as multiples, so a miss of x4.8 means the typical
+ *  price lands within a factor of 4.8 either way. */
+export function computeBacktest(snapshot: Snapshot, model: ModelConstants): Backtest {
+  const live = snapshot.protocols
+    .filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.listed_at !== null)
+    .sort((a, b) => {
+      const d = (a.listed_at as string).localeCompare(b.listed_at as string);
+      return d !== 0 ? d : a.slug.localeCompare(b.slug);
+    });
+  const half = Math.floor(live.length / 2);
+  const older = live.slice(0, half);
+  const newer = live.slice(half);
+  const flatMultiple = median(older.map((p) => (p.mcap_usd as number) / p.tvl_usd));
+  const modelMiss: number[] = [];
+  const flatMiss: number[] = [];
+  let within = 0;
+  let logSum = 0;
+  for (const p of newer) {
+    const priced = impliedValue(p, snapshot.as_of, model);
+    const ratio = priced.implied / (p.mcap_usd as number);
+    const miss = Math.abs(Math.log(ratio));
+    modelMiss.push(miss);
+    flatMiss.push(Math.abs(Math.log((p.tvl_usd * flatMultiple) / (p.mcap_usd as number))));
+    if (miss <= Math.log(RANGE_FACTOR)) within += 1;
+    logSum += Math.log(ratio);
+  }
+  return {
+    n_live: live.length,
+    n_older: older.length,
+    n_newer: newer.length,
+    flat_multiple_older: flatMultiple,
+    model_miss_newer: Math.exp(median(modelMiss)),
+    flat_miss_newer: Math.exp(median(flatMiss)),
+    within_x3_newer_pct: newer.length ? (100 * within) / newer.length : 0,
+    bias_newer: newer.length ? logSum / newer.length : 0,
+    range_factor: RANGE_FACTOR,
+  };
+}
+
+/** The ledger: every protocol in the snapshot, counted once, in the order the page lists them.
+ *  Ranked rows come first (watchlist, then rankable above the floor the watchlist does not name,
+ *  then the early rows below it); the rest are the tokens that trade, the tokens on record
+ *  without a market cap, and the protocols the watchlist's own rule sets aside. Anything that
+ *  fits none of these is counted under "other" rather than dropped. */
+export function computeLedger(snapshot: Snapshot, board: BoardRow[]): LedgerBucket[] {
+  const onBoard = new Map(board.map((r) => [r.slug, r]));
+  const watchlist = new Set(snapshot.watchlist);
+  const counts = new Map<string, number>();
+  const bump = (key: string) => counts.set(key, (counts.get(key) ?? 0) + 1);
+  for (const p of snapshot.protocols) {
+    if (onBoard.has(p.slug)) {
+      if (watchlist.has(p.slug)) bump('watchlist');
+      else if (p.tvl_usd >= snapshot.floor_usd) bump('off-list');
+      else bump('early');
+    } else if (p.mcap_usd !== null) bump('token-trades');
+    else if (p.gecko_id !== null || p.symbol !== null) bump('token-on-record');
+    else if (p.category === 'Bridge' || p.category === 'Canonical Bridge') bump('bridge');
+    else if (p.category === 'Liquid Staking' || p.category === 'Liquid Restaking' || p.category === 'Restaked BTC') bump('liquid-staking');
+    else if (p.category === 'CEX') bump('exchange-custody');
+    else if (VERSIONED.test(p.name)) bump('versioned');
+    else if (WRAPPED_NAME.test(p.name) || EXCHANGE_PREFIX.test(p.name)) bump('wrapped-or-exchange');
+    else bump('other');
+  }
+  const defs: Array<[string, string, string]> = [
+    ['watchlist', 'Watchlist', 'every protocol the watchlist names, all 40 of them'],
+    ['off-list', 'Off list · above floor', 'rankable by the same rule, above $50M, not on the watchlist'],
+    ['early', 'Early · below floor', 'rankable pre-token protocols under $50M of TVL'],
+    ['token-trades', 'Already trade', 'a market cap on record'],
+    ['token-on-record', 'Token on record', 'a token listed, no market cap on record'],
+    ['bridge', 'Bridge', 'a bridge or canonical bridge product of a token that trades'],
+    ['liquid-staking', 'Liquid staking', 'a liquid-staked, restaked or wrapped-staked product'],
+    ['exchange-custody', 'Exchange custody', 'an exchange custody product'],
+    ['versioned', 'Versioned', 'a numbered version of a protocol, not the protocol itself'],
+    ['wrapped-or-exchange', 'Wrapped / exchange', 'a wrapped token or an exchange-named product'],
+    ['other', 'Other', 'fits none of the buckets above'],
+  ];
+  return defs.map(([key, label, note]) => ({ label, count: counts.get(key) ?? 0, note }));
+}
+
 /** What one transaction costs on a chain: cheap on a rollup or Solana, dear on Ethereum mainnet. */
 function gasFor(chain: string): string {
   const c = chain.toLowerCase();
@@ -434,6 +654,10 @@ export function radarRow(row: BoardRow, watchlist: Set<string>): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
+    range_low_usd: row.range_low_usd,
+    range_high_usd: row.range_high_usd,
+    launch_odds: row.launch_odds,
+    farm: row.farm,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     chain_multiplier: row.model.chain_multiplier,
@@ -457,6 +681,10 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     board_size: board.length,
     early_size: early,
     live_size: live.length,
+    total_implied_usd: board.reduce((sum, r) => sum + r.implied_value_usd, 0),
+    ledger: computeLedger(snapshot, board),
+    backtest: computeBacktest(snapshot, model),
+    odds_cohorts: oddsCohorts(snapshot),
     rows: board.map((r) => radarRow(r, new Set(snapshot.watchlist))),
     live,
   };
