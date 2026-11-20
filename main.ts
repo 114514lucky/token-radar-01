@@ -43,6 +43,26 @@ if (!existsSync(inputFile)) {
 const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
 const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
+
+/** Fail fast on a snapshot the model cannot score honestly: an empty protocol
+ *  list, an empty watchlist, or a watchlist slug the snapshot does not carry.
+ *  buildBoard silently skips a missing slug, so without this check a snapshot
+ *  that lost a watchlist row would hand in a board the gate's coverage row
+ *  refuses, with no word about why. */
+const missingWatchlist = snapshot.watchlist.filter((s) => !snapshot.protocols.some((p) => p.slug === s));
+if (snapshot.protocols.length === 0) {
+  process.stderr.write('token radar: snapshot holds no protocols\n');
+  process.exit(2);
+}
+if (snapshot.watchlist.length === 0) {
+  process.stderr.write('token radar: snapshot holds an empty watchlist\n');
+  process.exit(2);
+}
+if (missingWatchlist.length > 0) {
+  process.stderr.write(`token radar: watchlist names ${missingWatchlist.length} slug(s) the snapshot does not carry: ${missingWatchlist.slice(0, 5).join(', ')}\n`);
+  process.exit(2);
+}
+
 const { board, radar } = buildRadar(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) {
@@ -78,6 +98,16 @@ if (shots.length < 3) {
 for (const name of shots) {
   if (!IMAGE_NAME.test(name)) {
     process.stderr.write(`token radar: screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters\n`);
+    process.exit(1);
+  }
+}
+
+/** The gate refuses a screenshot past 512 KiB: refuse here, before the dossier
+ *  is written, rather than handing in an output the scorer will not take. */
+for (const name of shots) {
+  const bytes = statSync(join(out, 'screenshots', name)).size;
+  if (bytes > 524_288) {
+    process.stderr.write(`token radar: screenshots/${name} is ${bytes} bytes: the gate caps a screenshot at 524288\n`);
     process.exit(1);
   }
 }
