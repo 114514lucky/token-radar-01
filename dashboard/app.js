@@ -1,7 +1,8 @@
 'use strict';
-/* Token Radar dashboard, v2.
+/* Token Radar dashboard, v3 (model radar-3).
  * Renders window.RADAR (data.js, written by main.ts from the sealed snapshot). Every number
- * on the page comes from that data: the board, the ledger, the backtest, the odds cohorts.
+ * on the page comes from that data: the board, the ledger, the cross-sectional check, the
+ * token-rate cohorts.
  * The what-if controls recompute only the farm economics of a row (its airdrop slice, its net
  * of fees and opportunity cost, its verdict) from the row's own farm numbers; they never
  * change a rank, an implied value or a range. */
@@ -69,16 +70,11 @@ function econ(r) {
  * would hide the chip. */
 function vcls(v) { return v === 'SKIP' ? 'verdict-skip' : v.toLowerCase(); }
 
-/* The model in one function: the page recomputes a row from the snapshot figures and checks
- * the number board.json carries, so the page's code and the board's data are visibly the same
- * arithmetic. */
+/* The model in one function: the page recomputes a row from TVL alone through the fitted
+ * power law and checks the number board.json carries, so the page's code and the board's
+ * data are visibly the same arithmetic. */
 function impliedOf(row, model) {
-  const growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
-  const growthMult = 1 + (growth / 100) * model.growth_weight;
-  const age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
-  const maturity = model.maturity_floor + Math.sqrt(Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const chainMult = 1 + model.chain_weight * Math.min(Math.max((row.chains || []).length - 1, 0), model.chain_cap);
-  return Math.max(1, Math.round(row.tvl_usd * model.base_multiple * growthMult * maturity * chainMult));
+  return Math.max(1, Math.round(10 ** (model.intercept_log10 + model.tvl_exponent * Math.log10(row.tvl_usd))));
 }
 
 function header() {
@@ -95,7 +91,7 @@ function lede() {
 
 function kpis() {
   const rows = DATA.rows;
-  const bt = DATA.backtest;
+  const bt = DATA.cross_check;
   let farmN = 0; let best = null; let bestName = '';
   for (const r of rows) {
     const e = econ(r);
@@ -106,8 +102,8 @@ function kpis() {
   return '<section class="kpis">' +
     card('RANKED', fmtInt(DATA.board_size), DATA.watchlist_size + ' watchlist · ' + (DATA.board_size - DATA.watchlist_size) + ' off-list and early') +
     card('TOTAL IMPLIED', fmtUsd(DATA.total_implied_usd), 'sum of all ' + fmtInt(DATA.board_size) + ' rows') +
-    card('VALUE MISS · HELD OUT', fmtMult(bt.model_miss_newer), 'flat multiple ' + fmtMult(bt.flat_miss_newer) + ' · newer half n=' + bt.n_newer) +
-    card('WITHIN ×3 RANGE', bt.within_x3_newer_pct.toFixed(0) + '%', 'of the newer half landed inside ×3') +
+    card('VALUE MISS · HOLDOUT', fmtMult(bt.model_miss_holdout), 'flat multiple ' + fmtMult(bt.flat_miss_holdout) + ' · cross-sectional · n=' + bt.n_holdout) +
+    card('WITHIN ×3 RANGE', bt.within_x3_holdout_pct.toFixed(0) + '%', 'of the frozen holdout landed inside ×3') +
     card('WORTH FARMING', fmtInt(farmN), 'FARM at $' + fmtInt(state.deposit) + ' · ' + fmtPct(state.drop, 1) + ' drop · ' + fmtPct(state.tbill, 0) + ' T-bill') +
     card('BEST PER HOUR', fmtSigned(best), esc(bestName)) +
     '</section>';
@@ -125,19 +121,20 @@ function ledgerPanel() {
 }
 
 function methodPanel() {
-  const bt = DATA.backtest;
+  const bt = DATA.cross_check;
   const m = DATA.model;
   return '<section class="panel"><h2>How a launch is priced</h2>' +
-    '<p class="formula">implied = TVL × ' + m.base_multiple + ' × growth × maturity × chains</p>' +
-    '<p class="panel-note">Growth is the 7-day change clamped to −60…+120%, halved; maturity rises with √age up to 3 years; chains add 2% each, up to 5; unknown age counts as 365 days.</p>' +
+    '<p class="formula">implied = 10^' + m.intercept_log10 + ' × TVL^' + m.tvl_exponent + '</p>' +
+    '<p class="panel-note">A power law fitted on the 47 earlier-listed tokens that trade (log-log OLS). TVL alone prices a launch; 7-day growth, age and chain count were tried on train and dropped — none cleared the bar. The value is the value if a token launches; it is not multiplied by the token rate.</p>' +
     '<table class="mini"><tbody>' +
-    '<tr><td>Backtest, newer half</td><td class="num">n=' + bt.n_newer + ' · split by listing date</td></tr>' +
-    '<tr><td>Model miss</td><td class="num">' + fmtMult(bt.model_miss_newer) + '</td></tr>' +
-    '<tr><td>Flat multiple miss</td><td class="num">' + fmtMult(bt.flat_miss_newer) + ' · multiple ' + fmtMult(bt.flat_multiple_older) + '</td></tr>' +
-    '<tr><td>Inside the ×3 range</td><td class="num">' + bt.within_x3_newer_pct.toFixed(0) + '% of the newer half</td></tr>' +
-    '<tr><td>Mean log bias</td><td class="num">' + (bt.bias_newer >= 0 ? '+' : '') + bt.bias_newer.toFixed(2) + ' · near zero</td></tr>' +
+    '<tr><td>Cross-sectional check, holdout</td><td class="num">n=' + bt.n_holdout + ' · split by listing date, one snapshot</td></tr>' +
+    '<tr><td>Model miss</td><td class="num">' + fmtMult(bt.model_miss_holdout) + '</td></tr>' +
+    '<tr><td>Flat multiple miss</td><td class="num">' + fmtMult(bt.flat_miss_holdout) + ' · multiple ' + bt.flat_multiple_train.toFixed(3) + '</td></tr>' +
+    '<tr><td>Inside the ×3 range</td><td class="num">' + bt.within_x3_holdout_pct.toFixed(0) + '% of the frozen holdout</td></tr>' +
+    '<tr><td>Inside the ×10 range</td><td class="num">' + bt.within_x10_holdout_pct.toFixed(0) + '% of the frozen holdout</td></tr>' +
+    '<tr><td>Mean log bias</td><td class="num">' + (bt.bias_holdout >= 0 ? '+' : '') + bt.bias_holdout.toFixed(2) + ' · the model over-prices the holdout on average</td></tr>' +
     '</tbody></table>' +
-    '<p class="panel-note">The backtest measures the model as written — no constant is fitted to it; the older half sets the flat multiple only.</p></section>';
+    '<p class="panel-note">One snapshot, two groups by listing date: a cross-sectional check, not a forecast over time. No constant is fitted to the holdout; the train group sets the flat multiple only.</p></section>';
 }
 
 function scatterPanel() {
@@ -145,7 +142,8 @@ function scatterPanel() {
   const x0 = Math.log10(1e6), x1 = Math.log10(4e9), y0 = Math.log10(1e5), y1 = Math.log10(1e9);
   const X = (v) => L + ((Math.log10(v) - x0) / (x1 - x0)) * (W - L - R);
   const Y = (v) => T + (1 - (Math.log10(v) - y0) / (y1 - y0)) * (H - T - B);
-  const line = 'M' + X(1e6).toFixed(1) + ',' + Y(2.5e5).toFixed(1) + ' L' + X(4e9).toFixed(1) + ',' + Y(1e9).toFixed(1);
+  const fitted = (tvl) => 10 ** (DATA.model.intercept_log10 + DATA.model.tvl_exponent * Math.log10(tvl));
+  const line = 'M' + X(1e6).toFixed(1) + ',' + Y(fitted(1e6)).toFixed(1) + ' L' + X(4e9).toFixed(1) + ',' + Y(fitted(4e9)).toFixed(1);
   const dots = DATA.rows.map((r) => {
     const fill = r.watchlist ? '#0f766e' : (r.tvl_usd >= DATA.floor_usd ? '#14919b' : '#a7c4bc');
     const rad = r.rank <= 3 ? 3.4 : 2.1;
@@ -156,7 +154,7 @@ function scatterPanel() {
   return '<section class="panel"><h2>Implied value against TVL</h2>' +
     '<svg viewBox="0 0 ' + W + ' ' + H + '" class="scatter" role="img" aria-label="Scatter of implied value against TVL for all ranked rows">' +
     '<path d="' + line + '" class="base-line"/>' + dots + xTicks + yTicks + '</svg>' +
-    '<p class="panel-note">Dashed line: the base multiple ×0.25. Dark dots are watchlist rows; the three largest are the top three ranks.</p></section>';
+    '<p class="panel-note">Dashed line: the fitted power law, 10^' + DATA.model.intercept_log10 + ' × TVL^' + DATA.model.tvl_exponent + '. Dark dots are watchlist rows; the three largest are the top three ranks.</p></section>';
 }
 
 function midRow() {
@@ -250,7 +248,7 @@ function sortedRows(list) {
     if (key === 'tvl') return r.tvl_usd;
     if (key === 'change') return r.change_7d === null ? -Infinity : r.change_7d;
     if (key === 'age') return r.age_days === null ? Infinity : r.age_days;
-    if (key === 'odds') return r.launch_odds;
+    if (key === 'token_rate') return r.token_rate;
     if (key === 'implied') return r.implied_value_usd;
     if (key === 'slice') return econ(r).slice;
     if (key === 'net') return econ(r).net;
@@ -293,7 +291,7 @@ function boardTable() {
       '<td class="num">' + fmtUsd(r.tvl_usd) + '</td>' +
       '<td class="num ' + chg + '">' + fmtChg(r.change_7d) + '</td>' +
       '<td class="num">' + fmtAge(r.age_days) + '</td>' +
-      '<td class="num">' + fmtPct(r.launch_odds, 0) + '</td>' +
+      '<td class="num">' + fmtPct(r.token_rate, 0) + '</td>' +
       '<td><div class="implied"><div class="bar" aria-hidden="true"><i style="width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%"></i></div>' +
       '<span class="num">' + fmtUsd(r.implied_value_usd) + '</span></div>' +
       '<div class="range-sub">range ' + fmtUsd(r.range_low_usd) + ' – ' + fmtUsd(r.range_high_usd) + '</div></td>' +
@@ -303,8 +301,8 @@ function boardTable() {
       '</tr>';
   }).join('');
   return '<div class="panel"><div class="table-wrap"><table>' +
-    '<caption class="sub">Pre-token protocols, strongest implied value first. Select a row for its model, odds and farm plan. Slice and net use the what-if settings above.</caption>' +
-    '<thead><tr>' + sortHeader('rank', 'Rank') + sortHeader('name', 'Protocol') + sortHeader('tvl', 'TVL') + sortHeader('change', '7d') + sortHeader('age', 'Age') + sortHeader('odds', 'Odds') + sortHeader('implied', 'Implied value') + sortHeader('slice', 'Slice') + sortHeader('net', 'Net') + '<th scope="col">Verdict</th></tr></thead>' +
+    '<caption class="sub">Pre-token protocols, strongest implied value first. Select a row for its model, token rate and farm plan. Slice and net use the what-if settings above.</caption>' +
+    '<thead><tr>' + sortHeader('rank', 'Rank') + sortHeader('name', 'Protocol') + sortHeader('tvl', 'TVL') + sortHeader('change', '7d') + sortHeader('age', 'Age') + sortHeader('token_rate', 'Token rate') + sortHeader('implied', 'Implied value') + sortHeader('slice', 'Slice') + sortHeader('net', 'Net') + '<th scope="col">Verdict</th></tr></thead>' +
     '<tbody>' + body + '</tbody></table></div></div>';
 }
 
@@ -341,7 +339,7 @@ function footer() {
 }
 
 function cohortFor(age) {
-  const cohorts = DATA.odds_cohorts;
+  const cohorts = DATA.token_rate_cohorts;
   const a = age === null || age === undefined ? 365 : age;
   for (let i = 0; i < cohorts.length; i++) {
     const c = cohorts[i];
@@ -377,17 +375,15 @@ function openDetail(slug) {
     '<button class="close" type="button" aria-label="Close details" id="detail-close">Close</button></div>' +
     '<section class="detail-section"><h3>Implied value</h3><div class="equation">' +
     '<div><span>TVL</span><b class="num">' + fmtUsd(row.tvl_usd) + '</b></div>' +
-    '<div><span>Seven-day growth</span><b class="num">' + fmtChg(row.change_7d) + '</b></div>' +
-    '<div><span>Age with no token</span><b class="num">' + fmtAge(row.age_days) + '</b></div>' +
-    '<div><span>Growth multiplier</span><b class="num">' + row.growth_multiplier + '</b></div>' +
-    '<div><span>Maturity multiplier</span><b class="num">' + row.maturity_multiplier + '</b></div>' +
-    '<div><span>Chain multiplier</span><b class="num">' + row.chain_multiplier + '</b></div>' +
+    '<div><span>log10(TVL)</span><b class="num">' + row.log10_tvl_usd + '</b></div>' +
+    '<div><span>Fitted intercept</span><b class="num">' + DATA.model.intercept_log10 + '</b></div>' +
+    '<div><span>Fitted TVL exponent</span><b class="num">' + DATA.model.tvl_exponent + '</b></div>' +
     '<div><span>Implied value</span><b class="num">' + fmtUsd(row.implied_value_usd) + '</b></div>' +
     '<div><span>Range (×3 either way)</span><b class="num">' + fmtUsd(row.range_low_usd) + ' – ' + fmtUsd(row.range_high_usd) + '</b></div>' +
-    '<div><span>Launch odds</span><b class="num">' + fmtPct(row.launch_odds, 0) + ' · ' + esc(cohort.label) + ' cohort (n=' + cohort.n + ')</b></div>' +
+    '<div><span>Token rate</span><b class="num">' + fmtPct(row.token_rate, 0) + ' · ' + esc(cohort.label) + ' cohort (n=' + cohort.n + ')</b></div>' +
     '</div><p class="sub">Model ' + esc(DATA.model_version) + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) +
     (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') +
-    ' This is an estimate, not a price. The range is ×3 either way; ' + DATA.backtest.within_x3_newer_pct.toFixed(0) + '% of the newer held-out half landed inside it.</p></section>' +
+    ' Only TVL enters the value; age with no token (' + fmtAge(row.age_days) + ') sets the token-rate band and the 7-day change (' + fmtChg(row.change_7d) + ') is shown for context. This is an estimate, not a price. The range is ×3 either way; ' + DATA.cross_check.within_x3_holdout_pct.toFixed(0) + '% of the frozen holdout landed inside it. The token rate is the share of protocols in this age band that record a token — a cross-sectional share, not a launch forecast.</p></section>' +
     '<section class="detail-section"><h3>Farm economics — at $' + fmtInt(state.deposit) + ' deposit · ' + fmtPct(state.drop, 1) + ' drop share · ' + fmtPct(state.tbill, 0) + ' T-bill</h3><div class="equation">' +
     '<div><span>Airdrop slice</span><b class="num">' + fmtMoney(e.slice) + '</b></div>' +
     '<div><span>Fees (setup + weekly gas)</span><b class="num">−' + fmtMoney(e.fees) + '</b></div>' +
@@ -409,11 +405,11 @@ function openDetail(slug) {
 
 function exportCsv() {
   const list = sortedRows(rows());
-  const head = 'rank,protocol,category,chains,tvl_usd,change_7d,age_days,launch_odds,implied_value_usd,range_low_usd,range_high_usd,slice_usd,net_usd,verdict,farm_hours';
+  const head = 'rank,protocol,category,chains,tvl_usd,change_7d,age_days,token_rate,implied_value_usd,range_low_usd,range_high_usd,slice_usd,net_usd,verdict,farm_hours';
   const q = (v) => '"' + String(v === null || v === undefined ? '' : v).replace(/"/g, '""') + '"';
   const lines = list.map((r) => {
     const e = econ(r);
-    return [r.rank, q(r.name), q(r.category || ''), q((r.chains || []).join(';')), r.tvl_usd, r.change_7d === null ? '' : r.change_7d, r.age_days === null ? '' : r.age_days, r.launch_odds, r.implied_value_usd, r.range_low_usd, r.range_high_usd, e.slice.toFixed(2), e.net.toFixed(2), e.verdict, r.farm.hours].join(',');
+    return [r.rank, q(r.name), q(r.category || ''), q((r.chains || []).join(';')), r.tvl_usd, r.change_7d === null ? '' : r.change_7d, r.age_days === null ? '' : r.age_days, r.token_rate, r.implied_value_usd, r.range_low_usd, r.range_high_usd, e.slice.toFixed(2), e.net.toFixed(2), e.verdict, r.farm.hours].join(',');
   });
   const blob = new Blob([[head].concat(lines).join('\n')], { type: 'text/csv' });
   const a = document.createElement('a');

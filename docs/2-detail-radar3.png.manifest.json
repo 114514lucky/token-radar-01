@@ -1,0 +1,12 @@
+{
+  "version": "radar3",
+  "name": "2-detail-radar3.png",
+  "path": "screenshots/2-detail-radar3.png",
+  "format": "PNG",
+  "size_bytes": 227942,
+  "sha256": "eabbb0fcaddde72abd8279a871392b21d69456bdcb71b3409a443bdae3f0b7c6",
+  "generated_at": "2026-11-21T02:22:46.847467+00:00",
+  "generated_from": "chromium-headless-shell screenshot of dashboard/index.html#p=sentora-curator + data.js 26fffe04e222e627f19fbc56d583d0895f797f843286c44f10087ce3e07b260f",
+  "resolution": "1440x900",
+  "pixel_sha256": "d2ca7de9e2468fe101268c9c67a4f6817b068c808eba9b318d89c604d4cb9b88"
+}

@@ -1,0 +1,12 @@
+{
+  "version": "radar3",
+  "name": "1-board-radar3.png",
+  "path": "screenshots/1-board-radar3.png",
+  "format": "PNG",
+  "size_bytes": 180511,
+  "sha256": "a5cedd004912866e2967766d3905ac25784c8ddf9cac524fb79cbb656cc5d98b",
+  "generated_at": "2026-11-21T02:22:45.937696+00:00",
+  "generated_from": "chromium-headless-shell screenshot of dashboard/index.html + data.js 26fffe04e222e627f19fbc56d583d0895f797f843286c44f10087ce3e07b260f",
+  "resolution": "1440x900",
+  "pixel_sha256": "6576b766d607c8f29d5a4950db89910dda19e6419d6867766262734c32ebd764"
+}

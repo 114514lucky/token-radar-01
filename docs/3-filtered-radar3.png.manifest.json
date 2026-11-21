@@ -1,0 +1,12 @@
+{
+  "version": "radar3",
+  "name": "3-filtered-radar3.png",
+  "path": "screenshots/3-filtered-radar3.png",
+  "format": "PNG",
+  "size_bytes": 175284,
+  "sha256": "31c31ba1c1772f884a049db55b5e9f09a38e60f77538f0a7c3833c1446065d9a",
+  "generated_at": "2026-11-21T02:22:47.934443+00:00",
+  "generated_from": "chromium-headless-shell screenshot of dashboard/index.html#q=Lending + data.js 26fffe04e222e627f19fbc56d583d0895f797f843286c44f10087ce3e07b260f",
+  "resolution": "1440x900",
+  "pixel_sha256": "657bf2700af5d52dc46dd3edf51ca567a32832abd5875eab4133b02a512ec1f7"
+}

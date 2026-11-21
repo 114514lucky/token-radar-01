@@ -5,24 +5,30 @@
 // the early rows the radar exists to find. A protocol is pre-token when its index entry records no
 // token (no market cap, no CoinGecko id, no symbol); the snapshot's live-token protocols are kept
 // apart and shown as the market's own values, never mixed into the ranked board. Each row also
-// carries its printed range (implied divided and multiplied by 3), its launch odds (its age band's
-// token rate), and its farm economics as numbers; the board's ledger counts every protocol in the
-// snapshot once, and the backtest prices the tokens that trade by splitting them on listing date.
+// carries its printed range (implied divided and multiplied by 3), its token rate (the share of
+// protocols in its age band that record a token — a cross-sectional share among protocols that
+// already exist, not a probability that this protocol will launch), and its farm economics as
+// numbers; the board's ledger counts every protocol in the snapshot once, and the cross-sectional
+// check prices the tokens that trade by splitting them into an earlier-listed train group and a
+// later-listed frozen holdout.
 //
-// Implied value follows only from the snapshot's own figures:
+// Implied value is a fitted power law in TVL, and nothing else:
 //
-//   base       = tvl_usd x BASE_MULTIPLE
-//   growth     = clamp(change_7d, -60, 120) per cent
-//   growthMult = 1 + (growth / 100) x GROWTH_WEIGHT
-//   maturity   = 0.6 + sqrt(min(age_days, 1095) / 1095) x 0.4   (age_days unknown: 365)
-//   chainMult  = 1 + 0.02 x min(chains - 1, 5)
-//   implied    = max(1, round(base x growthMult x maturity x chainMult))
+//   implied = max(1, round(10 ^ (INTERCEPT_LOG10 + TVL_EXPONENT x log10(tvl_usd))))
 //
-// Maturity uses a square root so age matters most in the first year a protocol runs with no token
-// and flattens after that: a protocol that has run three years without a token is not three times
-// more "due" than one that ran one year. Chain breadth counts because a protocol live on more
-// chains has a wider distribution for a launch. The constants are the model's, stated in the
-// dashboard. No protocol name is ever special-cased: the same function scores every row.
+// The two constants are fitted, not hand-picked: ordinary least squares of log10(market cap) on
+// log10(TVL) over the 47 earlier-listed tokens that trade (the frozen train set — see
+// docs/frozen-split-radar-3.md). The fit is log10(mcap) = 2.7441 + 0.5630 x log10(TVL),
+// R-squared 0.294 on train. Momentum (7-day change), age and chain count were each tried and
+// dropped: none improved the train leave-one-out median miss by the 10% margin the freeze
+// requires (momentum and age made it worse). No protocol name is ever special-cased: the same
+// function scores every row. The value is the value if a token launches; it is NOT multiplied
+// by the token rate, because that rate is a cross-sectional share, not a launch probability.
+//
+// The snapshot is a single cross-section (as of 2026-11-14) and there is no earlier snapshot,
+// so nothing here is a forecast over time. The cross-sectional check is two groups of one
+// snapshot, split by listing date; its holdout numbers are coverage on those 48 frozen rows,
+// not a hit rate on future tokens.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -47,42 +53,29 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-/** The model's constants, as the dashboard states them and the sandbox may change them. */
+/** The model's constants: the fitted power law, as the dashboard states it. Fitted by OLS
+ *  of log10(market cap) on log10(TVL) over the 47 earlier-listed traded tokens (the frozen
+ *  train set); the shipped values are the fit rounded to 4 decimals, and the verifier
+ *  recomputes the fit from the snapshot and checks these constants. */
 export interface ModelConstants {
-  base_multiple: number;
-  growth_weight: number;
-  growth_floor: number;
-  growth_cap: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
-  unknown_age_days: number;
-  chain_weight: number;
-  chain_cap: number;
+  intercept_log10: number;
+  tvl_exponent: number;
 }
 
 export const MODEL: ModelConstants = {
-  base_multiple: 0.25,
-  growth_weight: 0.5,
-  growth_floor: -60,
-  growth_cap: 120,
-  maturity_floor: 0.6,
-  maturity_range: 0.4,
-  maturity_days: 1095,
-  unknown_age_days: 365,
-  chain_weight: 0.02,
-  chain_cap: 5,
+  intercept_log10: 2.7441,
+  tvl_exponent: 0.563,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
-/** The printed range around an implied value: a factor of 3 either way. The backtest
- *  measures how often the newer half of the tokens that trade landed inside it. */
+/** The printed range around an implied value: a factor of 3 either way. The cross-sectional
+ *  check measures how often the frozen holdout landed inside it. */
 export const RANGE_FACTOR = 3;
 
-/** Age buckets for launch odds: the share of protocols this old that record a token. */
-export const ODDS_BUCKETS: Array<{ label: string; lo: number; hi: number | null }> = [
+/** Age buckets for the token rate: the share of protocols this old that record a token. */
+export const TOKEN_RATE_BUCKETS: Array<{ label: string; lo: number; hi: number | null }> = [
   { label: 'under 6 months', lo: 0, hi: 180 },
   { label: '6–12 months', lo: 180, hi: 365 },
   { label: '1–2 years', lo: 365, hi: 730 },
@@ -121,14 +114,12 @@ export interface BoardRow {
   implied_value_usd: number;
   range_low_usd: number;
   range_high_usd: number;
-  launch_odds: number;
+  token_rate: number;
   farm: FarmNumbers;
   model: {
-    base_multiple: number;
-    growth_pct: number;
-    growth_multiplier: number;
-    maturity_multiplier: number;
-    chain_multiplier: number;
+    intercept_log10: number;
+    tvl_exponent: number;
+    log10_tvl_usd: number;
     age_days: number | null;
   };
   farm_steps: string[];
@@ -163,11 +154,9 @@ export interface RadarRow {
   implied_value_usd: number;
   range_low_usd: number;
   range_high_usd: number;
-  launch_odds: number;
+  token_rate: number;
   farm: FarmNumbers;
-  growth_multiplier: number;
-  maturity_multiplier: number;
-  chain_multiplier: number;
+  log10_tvl_usd: number;
   farm_steps: string[];
   watchlist: boolean;
 }
@@ -190,25 +179,31 @@ export interface LedgerBucket {
   note: string;
 }
 
-/** The model's backtest on the tokens that trade: the live protocols are split by listing
- *  date, the older half calibrates nothing but a flat TVL multiple, and the newer half is
- *  priced by the model from TVL, growth, age and chains alone. Misses are medians of the
- *  absolute log error, shown as multiples, so a miss of x4.8 means the typical price is
- *  within a factor of 4.8 either way. */
-export interface Backtest {
+/** The model's cross-sectional check on the tokens that trade: the live protocols are split
+ *  by listing date into an earlier-listed train group (which fits the flat multiple and the
+ *  power law — the power law is fitted before this check, on train alone) and a later-listed
+ *  frozen holdout, which is priced by the model from TVL alone, and by the flat multiple for
+ *  comparison. This is one snapshot split in two, not a forecast over time: there is no
+ *  earlier snapshot, so no row here is priced before its listing date. Misses are medians
+ *  of the absolute log error, shown as multiples, so a miss of x3.0 means the typical price
+ *  lands within a factor of 3.0 either way. */
+export interface CrossCheck {
   n_live: number;
-  n_older: number;
-  n_newer: number;
-  flat_multiple_older: number;
-  model_miss_newer: number;
-  flat_miss_newer: number;
-  within_x3_newer_pct: number;
-  bias_newer: number;
+  n_train: number;
+  n_holdout: number;
+  flat_multiple_train: number;
+  model_miss_holdout: number;
+  flat_miss_holdout: number;
+  within_x3_holdout_pct: number;
+  within_x10_holdout_pct: number;
+  bias_holdout: number;
   range_factor: number;
 }
 
-/** One launch-odds cohort: protocols listed in an age band, and the share that record a token. */
-export interface OddsCohort {
+/** One token-rate cohort: protocols listed in an age band, and the share that record a token.
+ *  A cross-sectional share among protocols that already exist — not the probability that a
+ *  protocol in the band will launch a token. */
+export interface TokenRateCohort {
   label: string;
   lo_days: number;
   hi_days: number | null;
@@ -229,8 +224,8 @@ export interface RadarData {
   live_size: number;
   total_implied_usd: number;
   ledger: LedgerBucket[];
-  backtest: Backtest;
-  odds_cohorts: OddsCohort[];
+  cross_check: CrossCheck;
+  token_rate_cohorts: TokenRateCohort[];
   rows: RadarRow[];
   live: LiveRow[];
 }
@@ -245,11 +240,6 @@ export class SnapshotError extends Error {
 
 const DAY_MS = 86_400_000;
 
-/** A finite number, else `fallback`. */
-function finite(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-}
-
 /** A whole day count from `from` to `to`, clamped at zero; null when either date is absent or bad. */
 export function ageDays(asOf: string, listedAt: string | null): number | null {
   if (listedAt === null) return null;
@@ -259,18 +249,14 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/** The four multipliers and the implied value one protocol gets under `model`. */
-export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: ModelConstants): { implied: number; growthPct: number; growthMult: number; maturityMult: number; chainMult: number; age: number | null } {
+/** The fitted power law's implied value for one protocol: TVL alone, through the frozen
+ *  train fit. Age is returned for the row's display and its token-rate band; it does not
+ *  enter the value — the age term was tried on train and dropped (see the file header). */
+export function impliedValue(protocol: SnapshotProtocol, asOf: string, model: ModelConstants): { implied: number; log10Tvl: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  const rawGrowth = finite(protocol.change_7d, 0);
-  const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
-  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const ageForModel = age ?? model.unknown_age_days;
-  const maturityMult = model.maturity_floor + Math.sqrt(Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const chainMult = 1 + model.chain_weight * Math.min(Math.max(protocol.chains.length - 1, 0), model.chain_cap);
-  const base = protocol.tvl_usd * model.base_multiple;
-  const implied = Math.max(1, Math.round(base * growthMult * maturityMult * chainMult));
-  return { implied, growthPct, growthMult, maturityMult, chainMult, age };
+  const log10Tvl = Math.log10(protocol.tvl_usd);
+  const implied = Math.max(1, Math.round(10 ** (model.intercept_log10 + model.tvl_exponent * log10Tvl)));
+  return { implied, log10Tvl, age };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -333,10 +319,10 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     .slice(0, EARLY_ROWS);
   for (const p of early) chosen.set(p.slug, p);
 
-  const cohorts = oddsCohorts(snapshot);
+  const cohorts = tokenRateCohorts(snapshot);
   const scored = [...chosen.values()].map((p) => {
-    const { implied, growthPct, growthMult, maturityMult, chainMult, age } = impliedValue(p, snapshot.as_of, model);
-    return { p, implied, growthPct, growthMult, maturityMult, chainMult, age };
+    const { implied, log10Tvl, age } = impliedValue(p, snapshot.as_of, model);
+    return { p, implied, log10Tvl, age };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   return scored.map((s, i) => ({
@@ -356,14 +342,12 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     implied_value_usd: s.implied,
     range_low_usd: Math.max(1, Math.round(s.implied / RANGE_FACTOR)),
     range_high_usd: Math.round(s.implied * RANGE_FACTOR),
-    launch_odds: launchOddsFor(s.age, cohorts),
+    token_rate: tokenRateFor(s.age, cohorts),
     farm: farmNumerics(s.p, s.age),
     model: {
-      base_multiple: model.base_multiple,
-      growth_pct: s.growthPct,
-      growth_multiplier: round4(s.growthMult),
-      maturity_multiplier: round4(s.maturityMult),
-      chain_multiplier: round4(s.chainMult),
+      intercept_log10: model.intercept_log10,
+      tvl_exponent: model.tvl_exponent,
+      log10_tvl_usd: round4(s.log10Tvl),
       age_days: s.age,
     },
     farm_steps: farmSteps(s.p, s.age).map(stepText),
@@ -451,11 +435,11 @@ export function farmNumerics(p: SnapshotProtocol, age: number | null): FarmNumbe
   return { capital_usd: capital, gas_usd: gas, setup_gas_usd: 3, hold_days: hold, weeks, hours: Math.round(hours * 100) / 100 };
 }
 
-/** The launch-odds cohorts: every protocol with a listing date, banded by age, with the share
+/** The token-rate cohorts: every protocol with a listing date, banded by age, with the share
  *  that records a token. A protocol with no listing date takes the 1–2 year band's rate, the
- *  same band the model's unknown age (365 days) sits in. */
-export function oddsCohorts(snapshot: Snapshot): OddsCohort[] {
-  return ODDS_BUCKETS.map((b) => {
+ *  same band the unknown age (365 days) sits in. */
+export function tokenRateCohorts(snapshot: Snapshot): TokenRateCohort[] {
+  return TOKEN_RATE_BUCKETS.map((b) => {
     const inBand = snapshot.protocols.filter((p) => {
       if (p.listed_at === null) return false;
       const age = ageDays(snapshot.as_of, p.listed_at);
@@ -472,19 +456,22 @@ export function oddsCohorts(snapshot: Snapshot): OddsCohort[] {
   });
 }
 
-/** A row's launch odds: its age band's token rate, or the 1–2 year band when its age is unknown. */
-export function launchOddsFor(ageDaysValue: number | null, cohorts: OddsCohort[]): number {
+/** A row's token rate: its age band's token rate, or the 1–2 year band when its age is unknown. */
+export function tokenRateFor(ageDaysValue: number | null, cohorts: TokenRateCohort[]): number {
   const age = ageDaysValue ?? 365;
-  const idx = ODDS_BUCKETS.findIndex((b) => age >= b.lo && (b.hi === null || age < b.hi));
+  const idx = TOKEN_RATE_BUCKETS.findIndex((b) => age >= b.lo && (b.hi === null || age < b.hi));
   return cohorts[idx < 0 ? 2 : idx].token_rate;
 }
 
-/** The backtest: the tokens that trade, split by listing date into an older half and a newer
- *  half. The older half sets a flat TVL multiple; the newer half is priced by the model from
- *  TVL, growth, age and chains alone, and by the flat multiple for comparison. Misses are
- *  medians of the absolute log error, shown as multiples, so a miss of x4.8 means the typical
- *  price lands within a factor of 4.8 either way. */
-export function computeBacktest(snapshot: Snapshot, model: ModelConstants): Backtest {
+/** The cross-sectional check: the tokens that trade, split by listing date into an
+ *  earlier-listed train group and a later-listed frozen holdout. The train group sets the
+ *  flat TVL multiple (its median mcap/TVL); the holdout is priced by the fitted power law
+ *  from TVL alone, and by the flat multiple for comparison. Misses are medians of the
+ *  absolute log error, shown as multiples, so a miss of x3.0 means the typical price lands
+ *  within a factor of 3.0 either way. The split is the frozen one in
+ *  docs/frozen-split-radar-3.md: sorted by (listed_at, slug), the first half trains, the
+ *  rest is the holdout. One snapshot, two groups — not a forecast over time. */
+export function computeCrossCheck(snapshot: Snapshot, model: ModelConstants): CrossCheck {
   const live = snapshot.protocols
     .filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.listed_at !== null)
     .sort((a, b) => {
@@ -492,31 +479,34 @@ export function computeBacktest(snapshot: Snapshot, model: ModelConstants): Back
       return d !== 0 ? d : a.slug.localeCompare(b.slug);
     });
   const half = Math.floor(live.length / 2);
-  const older = live.slice(0, half);
-  const newer = live.slice(half);
-  const flatMultiple = median(older.map((p) => (p.mcap_usd as number) / p.tvl_usd));
+  const train = live.slice(0, half);
+  const holdout = live.slice(half);
+  const flatMultiple = median(train.map((p) => (p.mcap_usd as number) / p.tvl_usd));
   const modelMiss: number[] = [];
   const flatMiss: number[] = [];
-  let within = 0;
+  let within3 = 0;
+  let within10 = 0;
   let logSum = 0;
-  for (const p of newer) {
+  for (const p of holdout) {
     const priced = impliedValue(p, snapshot.as_of, model);
     const ratio = priced.implied / (p.mcap_usd as number);
     const miss = Math.abs(Math.log(ratio));
     modelMiss.push(miss);
     flatMiss.push(Math.abs(Math.log((p.tvl_usd * flatMultiple) / (p.mcap_usd as number))));
-    if (miss <= Math.log(RANGE_FACTOR)) within += 1;
+    if (miss <= Math.log(RANGE_FACTOR)) within3 += 1;
+    if (miss <= Math.log(10)) within10 += 1;
     logSum += Math.log(ratio);
   }
   return {
     n_live: live.length,
-    n_older: older.length,
-    n_newer: newer.length,
-    flat_multiple_older: flatMultiple,
-    model_miss_newer: Math.exp(median(modelMiss)),
-    flat_miss_newer: Math.exp(median(flatMiss)),
-    within_x3_newer_pct: newer.length ? (100 * within) / newer.length : 0,
-    bias_newer: newer.length ? logSum / newer.length : 0,
+    n_train: train.length,
+    n_holdout: holdout.length,
+    flat_multiple_train: flatMultiple,
+    model_miss_holdout: Math.exp(median(modelMiss)),
+    flat_miss_holdout: Math.exp(median(flatMiss)),
+    within_x3_holdout_pct: holdout.length ? (100 * within3) / holdout.length : 0,
+    within_x10_holdout_pct: holdout.length ? (100 * within10) / holdout.length : 0,
+    bias_holdout: holdout.length ? logSum / holdout.length : 0,
     range_factor: RANGE_FACTOR,
   };
 }
@@ -656,11 +646,9 @@ export function radarRow(row: BoardRow, watchlist: Set<string>): RadarRow {
     implied_value_usd: row.implied_value_usd,
     range_low_usd: row.range_low_usd,
     range_high_usd: row.range_high_usd,
-    launch_odds: row.launch_odds,
+    token_rate: row.token_rate,
     farm: row.farm,
-    growth_multiplier: row.model.growth_multiplier,
-    maturity_multiplier: row.model.maturity_multiplier,
-    chain_multiplier: row.model.chain_multiplier,
+    log10_tvl_usd: row.model.log10_tvl_usd,
     farm_steps: row.farm_steps,
     watchlist: watchlist.has(row.slug),
   };
@@ -683,8 +671,8 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     live_size: live.length,
     total_implied_usd: board.reduce((sum, r) => sum + r.implied_value_usd, 0),
     ledger: computeLedger(snapshot, board),
-    backtest: computeBacktest(snapshot, model),
-    odds_cohorts: oddsCohorts(snapshot),
+    cross_check: computeCrossCheck(snapshot, model),
+    token_rate_cohorts: tokenRateCohorts(snapshot),
     rows: board.map((r) => radarRow(r, new Set(snapshot.watchlist))),
     live,
   };
